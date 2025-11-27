@@ -1,69 +1,75 @@
-// Allowed feed modes we support from dubdub / anoncoin
-const ALLOWED_FEED_MODES = [
-  "trending",
-  "marketCap",
-  "volume24h",
-  "topToday",
-  "mostFollowed",
-  "new",
-];
+// server.mjs
+import express from "express";
+import cors from "cors";
 
-// GET /anoncoin/feeds/all?limit=20&chainType=solana&modes=trending,marketCap
-app.get("/anoncoin/feeds/all", async (req, res) => {
-  const limit = Number(req.query.limit || 20);
-  const chainType = String(req.query.chainType || "solana");
+const app = express();
+app.use(express.json());
 
-  // modes comes in as "trending,marketCap"
-  const requestedModes = String(req.query.modes || "trending,marketCap")
-    .split(",")
-    .map((m) => m.trim())
-    .filter(Boolean);
+// ---------- CORS ----------
+const allowedOrigins = (
+  process.env.CORS_ORIGINS ||
+  "http://localhost:5173,https://dogeagent.org,https://signals.dogeagent.org"
+)
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
 
-  const modes = requestedModes.filter((m) => ALLOWED_FEED_MODES.includes(m));
+// ---------- CORS: allow everything (read-only API, fine) ----------
+app.use(
+cors({
+    origin(origin, cb) {
+      // allow curl / server-to-server requests
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"), false);
+    },
+    origin: "*",
+})
+);
 
-  if (!modes.length) {
-    return res.status(400).json({
-      ok: false,
-      error: "No valid modes requested.",
-      allowed: ALLOWED_FEED_MODES,
-    });
-  }
-
-  const feeds = {};
-
-  for (const mode of modes) {
-    try {
-      const url = new URL("https://api.dubdub.tv/v1/feeds");
-      url.searchParams.set("limit", String(limit));
-      url.searchParams.set("sortBy", mode);       // trending / marketCap / etc.
-      url.searchParams.set("chainType", chainType);
-
-      const upstream = await fetch(url.toString(), {
-        headers: {
-          accept: "application/json",
-        },
-      });
-
-      if (!upstream.ok) {
-        console.error("dubdub error for mode", mode, upstream.status);
-        feeds[mode] = [];
-        continue;
-      }
-
-      const json = await upstream.json();
-      // dubdub response usually has { feeds: [...] }
-      feeds[mode] = json.feeds || json.data || json;
-    } catch (err) {
-      console.error("Error fetching mode", mode, err);
-      feeds[mode] = [];
-    }
-  }
-
-  res.json({
-    ok: true,
-    source: "dubdub.tv",
-    chainType,
-    limit,
-    feeds,
-  });
+// Optional logging so you can see who is calling
+app.use((req, res, next) => {
+  console.log("Incoming:", req.method, req.url, "Origin:", req.headers.origin);
+  next();
 });
+
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
+// Base for anoncoin/dubdub API
+@@ -70,7 +65,7 @@ async function cachedFetch(key, url, options = {}, ttlMs = DEFAULT_CACHE_TTL_MS)
+
+/**
+* Fetch a single feed from dubdub
+ * We don't validate sortBy here – we just proxy whatever anoncoin supports.
+ * (we just forward whatever sortBy anoncoin supports)
+*/
+async function fetchFeed({ sortBy, limit, chainType }) {
+const url = buildDubDubUrl({ sortBy, limit, chainType });
+@@ -80,7 +75,7 @@ async function fetchFeed({ sortBy, limit, chainType }) {
+headers: {
+Accept: "application/json",
+"User-Agent": "DogeAgent-Signals/1.0",
+      // Uncomment if anoncoin/dubdub starts requiring them:
+      // Uncomment if anoncoin/dubdub starts requiring these:
+// Origin: "https://anoncoin.it",
+// Referer: "https://anoncoin.it/",
+},
+@@ -89,7 +84,7 @@ async function fetchFeed({ sortBy, limit, chainType }) {
+return cachedFetch(key, url, options);
+}
+
+// ------------- Routes -------------
+// ---------------------- Routes ----------------------
+
+// Health check
+app.get("/health", (req, res) => {
+@@ -140,6 +135,7 @@ app.get("/anoncoin/feeds", async (req, res) => {
+*   {
+*     chainType,
+*     limit,
+ *     source,
+*     feeds: {
+*       marketCap: [...],
+*       volume24h: [...],
