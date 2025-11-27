@@ -5,7 +5,10 @@ const app = express();
 app.use(express.json());
 
 // ---------- CORS ----------
-const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173,https://dogeagent.org,https://signals.dogeagent.org")
+const allowedOrigins = (
+  process.env.CORS_ORIGINS ||
+  "http://localhost:5173,https://dogeagent.org,https://signals.dogeagent.org"
+)
   .split(",")
   .map((o) => o.trim())
   .filter(Boolean);
@@ -26,9 +29,6 @@ const PORT = process.env.PORT || 3000;
 // Base for anoncoin/dubdub API
 const DUBDUB_BASE = process.env.DUBDUB_BASE || "https://api.dubdub.tv/v1";
 
-// Supported sort modes
-const ALLOWED_SORTS = new Set(["trending", "new", "hot", "volume"]);
-
 // Simple in-memory cache { key: { ts, ttlMs, data } }
 const cache = new Map();
 const DEFAULT_CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 30000);
@@ -39,7 +39,7 @@ const DEFAULT_CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 30000);
 function buildDubDubUrl({ sortBy, limit, chainType }) {
   const params = new URLSearchParams({
     limit: String(limit ?? 10),
-    sortBy,
+    sortBy: sortBy || "marketCap",
     chainType: chainType || "solana",
   });
 
@@ -70,12 +70,9 @@ async function cachedFetch(key, url, options = {}, ttlMs = DEFAULT_CACHE_TTL_MS)
 
 /**
  * Fetch a single feed from dubdub
+ * We don't validate sortBy here – we just proxy whatever anoncoin supports.
  */
 async function fetchFeed({ sortBy, limit, chainType }) {
-  if (!ALLOWED_SORTS.has(sortBy)) {
-    throw new Error(`Invalid sortBy: ${sortBy}`);
-  }
-
   const url = buildDubDubUrl({ sortBy, limit, chainType });
   const key = `feed:${sortBy}:${limit}:${chainType}`;
 
@@ -83,7 +80,7 @@ async function fetchFeed({ sortBy, limit, chainType }) {
     headers: {
       Accept: "application/json",
       "User-Agent": "DogeAgent-Signals/1.0",
-      // Uncomment these if anoncoin/dubdub starts requiring them:
+      // Uncomment if anoncoin/dubdub starts requiring them:
       // Origin: "https://anoncoin.it",
       // Referer: "https://anoncoin.it/",
     },
@@ -106,22 +103,15 @@ app.get("/health", (req, res) => {
 /**
  * GET /anoncoin/feeds
  * Query:
- *   sortBy=trending|new|hot|volume (default: trending)
+ *   sortBy=marketCap|volume24h|topToday|mostFollowed|new|...
  *   limit=10
- *   chainType=solana (default)
+ *   chainType=solana
  */
 app.get("/anoncoin/feeds", async (req, res) => {
   try {
-    const sortBy = (req.query.sortBy || "trending").toString();
+    const sortBy = (req.query.sortBy || "marketCap").toString();
     const limit = req.query.limit ? Number(req.query.limit) : 10;
     const chainType = (req.query.chainType || "solana").toString();
-
-    if (!ALLOWED_SORTS.has(sortBy)) {
-      return res.status(400).json({
-        error: "invalid_sortBy",
-        message: `sortBy must be one of: ${[...ALLOWED_SORTS].join(", ")}`,
-      });
-    }
 
     const data = await fetchFeed({ sortBy, limit, chainType });
 
@@ -140,15 +130,22 @@ app.get("/anoncoin/feeds", async (req, res) => {
 
 /**
  * GET /anoncoin/feeds/all
- * Returns all four lists:
+ *
+ * Query:
+ *   modes=marketCap,volume24h,topToday,mostFollowed,new
+ *   limit=10
+ *   chainType=solana
+ *
+ * Returns:
  *   {
  *     chainType,
  *     limit,
  *     feeds: {
- *       trending: [...],
- *       new: [...],
- *       hot: [...],
- *       volume: [...]
+ *       marketCap: [...],
+ *       volume24h: [...],
+ *       topToday: [...],
+ *       mostFollowed: [...],
+ *       new: [...]
  *     }
  *   }
  */
@@ -157,7 +154,22 @@ app.get("/anoncoin/feeds/all", async (req, res) => {
     const limit = req.query.limit ? Number(req.query.limit) : 10;
     const chainType = (req.query.chainType || "solana").toString();
 
-    const sorts = ["trending", "new", "hot", "volume"];
+    const modesParam =
+      (req.query.modes ||
+        "marketCap,volume24h,topToday,mostFollowed,new"
+      ).toString();
+
+    const sorts = modesParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (!sorts.length) {
+      return res.status(400).json({
+        error: "invalid_modes",
+        message: "modes query must contain at least one sort key",
+      });
+    }
 
     const results = await Promise.all(
       sorts.map((sortBy) =>
