@@ -5,26 +5,25 @@ const app = express();
 app.use(express.json());
 
 // ---------- CORS ----------
-// In prod, set this to your actual UI origin, e.g. https://dogeagent.org
-const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173,https://dogeagent.org")
+const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:5173,https://dogeagent.org,https://signals.dogeagent.org")
   .split(",")
-  .map(o => o.trim())
+  .map((o) => o.trim())
   .filter(Boolean);
 
 app.use(
   cors({
     origin(origin, cb) {
-      // Allow non-browser tools / curl (no origin)
+      // allow curl / server-to-server requests
       if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
       return cb(new Error("Not allowed by CORS"), false);
-    }
+    },
   })
 );
 
 const PORT = process.env.PORT || 3000;
 
-// Base for anoncoin/dubdub API, configurable just in case
+// Base for anoncoin/dubdub API
 const DUBDUB_BASE = process.env.DUBDUB_BASE || "https://api.dubdub.tv/v1";
 
 // Supported sort modes
@@ -32,9 +31,7 @@ const ALLOWED_SORTS = new Set(["trending", "new", "hot", "volume"]);
 
 // Simple in-memory cache { key: { ts, ttlMs, data } }
 const cache = new Map();
-
-// Default cache time (ms)
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 30_000);
+const DEFAULT_CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 30000);
 
 /**
  * Build anoncoin/dubdub feed URL
@@ -43,7 +40,7 @@ function buildDubDubUrl({ sortBy, limit, chainType }) {
   const params = new URLSearchParams({
     limit: String(limit ?? 10),
     sortBy,
-    chainType: chainType || "solana"
+    chainType: chainType || "solana",
   });
 
   return `${DUBDUB_BASE}/feeds?${params.toString()}`;
@@ -52,7 +49,7 @@ function buildDubDubUrl({ sortBy, limit, chainType }) {
 /**
  * Fetch with simple cache
  */
-async function cachedFetch(key, url, options = {}, ttlMs = CACHE_TTL_MS) {
+async function cachedFetch(key, url, options = {}, ttlMs = DEFAULT_CACHE_TTL_MS) {
   const cached = cache.get(key);
   const now = Date.now();
 
@@ -65,8 +62,8 @@ async function cachedFetch(key, url, options = {}, ttlMs = CACHE_TTL_MS) {
     const text = await res.text().catch(() => "");
     throw new Error(`Upstream error ${res.status}: ${text}`);
   }
-  const data = await res.json();
 
+  const data = await res.json();
   cache.set(key, { ts: now, ttlMs, data });
   return data;
 }
@@ -82,14 +79,14 @@ async function fetchFeed({ sortBy, limit, chainType }) {
   const url = buildDubDubUrl({ sortBy, limit, chainType });
   const key = `feed:${sortBy}:${limit}:${chainType}`;
 
-  // If anoncoin requires headers, add them here:
   const options = {
     headers: {
       Accept: "application/json",
-      "User-Agent": "DogeAgent-Signals/1.0"
-      // "Origin": "https://anoncoin.it",
-      // "Referer": "https://anoncoin.it/"
-    }
+      "User-Agent": "DogeAgent-Signals/1.0",
+      // Uncomment these if anoncoin/dubdub starts requiring them:
+      // Origin: "https://anoncoin.it",
+      // Referer: "https://anoncoin.it/",
+    },
   };
 
   return cachedFetch(key, url, options);
@@ -102,7 +99,7 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "dogeagent-signals",
-    time: new Date().toISOString()
+    time: new Date().toISOString(),
   });
 });
 
@@ -122,7 +119,7 @@ app.get("/anoncoin/feeds", async (req, res) => {
     if (!ALLOWED_SORTS.has(sortBy)) {
       return res.status(400).json({
         error: "invalid_sortBy",
-        message: `sortBy must be one of: ${[...ALLOWED_SORTS].join(", ")}`
+        message: `sortBy must be one of: ${[...ALLOWED_SORTS].join(", ")}`,
       });
     }
 
@@ -133,7 +130,7 @@ app.get("/anoncoin/feeds", async (req, res) => {
       chainType,
       limit,
       source: "dubdub.tv",
-      items: data
+      items: data,
     });
   } catch (err) {
     console.error("Error in /anoncoin/feeds:", err);
@@ -163,9 +160,9 @@ app.get("/anoncoin/feeds/all", async (req, res) => {
     const sorts = ["trending", "new", "hot", "volume"];
 
     const results = await Promise.all(
-      sorts.map(sortBy =>
-        fetchFeed({ sortBy, limit, chainType }).catch(err => ({
-          _error: err.message
+      sorts.map((sortBy) =>
+        fetchFeed({ sortBy, limit, chainType }).catch((err) => ({
+          _error: err.message,
         }))
       )
     );
@@ -179,7 +176,15 @@ app.get("/anoncoin/feeds/all", async (req, res) => {
       chainType,
       limit,
       source: "dubdub.tv",
-      feeds
+      feeds,
     });
   } catch (err) {
-    console.error("Error in /anoncoin/feeds
+    console.error("Error in /anoncoin/feeds/all:", err);
+    res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`DogeAgent Signals listening on port ${PORT}`);
+});
