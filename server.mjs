@@ -64,6 +64,42 @@ async function cachedFetch(key, url, options = {}, ttlMs = DEFAULT_CACHE_TTL_MS)
 }
 
 /**
+ * Normalize dubdub/anoncoin feed response into a flat array of entries.
+ * This removes guesswork from the frontend.
+ */
+function normalizeDubDubFeed(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+
+  if (typeof data !== "object") return [];
+
+  // Common patterns:
+  // { feeds: [...] }
+  if (Array.isArray(data.feeds)) return data.feeds;
+
+  // Sometimes feeds: { something: [...] }
+  if (data.feeds && typeof data.feeds === "object" && !Array.isArray(data.feeds)) {
+    const feedsVals = Object.values(data.feeds);
+    const firstArray = feedsVals.find((v) => Array.isArray(v));
+    if (firstArray) return firstArray;
+  }
+
+  // Other common keys we might see
+  const candidateKeys = ["items", "data", "docs", "results", "tokens", "coins"];
+  for (const key of candidateKeys) {
+    const v = data[key];
+    if (Array.isArray(v)) return v;
+  }
+
+  // Fallback: first array among values
+  const vals = Object.values(data);
+  const firstArray = vals.find((v) => Array.isArray(v));
+  if (firstArray) return firstArray;
+
+  return [];
+}
+
+/**
  * Fetch a single feed from dubdub
  * (we just forward whatever sortBy anoncoin supports)
  */
@@ -75,7 +111,7 @@ async function fetchFeed({ sortBy, limit, chainType }) {
     headers: {
       Accept: "application/json",
       "User-Agent": "DogeAgent-Signals/1.0",
-      // Uncomment if anoncoin/dubdub starts requiring these:
+      // If anoncoin/dubdub ever require these, you can uncomment:
       // Origin: "https://anoncoin.it",
       // Referer: "https://anoncoin.it/",
     },
@@ -98,7 +134,7 @@ app.get("/health", (req, res) => {
 /**
  * GET /anoncoin/feeds
  * Query:
- *   sortBy=marketCap|volume24h|topToday|mostFollowed|new|...
+ *   sortBy=marketCap|volume24h|topToday|mostFollowed|new|trending|...
  *   limit=10
  *   chainType=solana
  */
@@ -108,14 +144,15 @@ app.get("/anoncoin/feeds", async (req, res) => {
     const limit = req.query.limit ? Number(req.query.limit) : 10;
     const chainType = (req.query.chainType || "solana").toString();
 
-    const data = await fetchFeed({ sortBy, limit, chainType });
+    const raw = await fetchFeed({ sortBy, limit, chainType });
+    const items = normalizeDubDubFeed(raw);
 
     res.json({
       sortBy,
       chainType,
       limit,
       source: "dubdub.tv",
-      items: data,
+      items,
     });
   } catch (err) {
     console.error("Error in /anoncoin/feeds:", err);
@@ -127,7 +164,7 @@ app.get("/anoncoin/feeds", async (req, res) => {
  * GET /anoncoin/feeds/all
  *
  * Query:
- *   modes=marketCap,volume24h,topToday,mostFollowed,new
+ *   modes=marketCap,volume24h,topToday,mostFollowed,new,trending
  *   limit=10
  *   chainType=solana
  *
@@ -138,10 +175,8 @@ app.get("/anoncoin/feeds", async (req, res) => {
  *     source,
  *     feeds: {
  *       marketCap: [...],
- *       volume24h: [...],
- *       topToday: [...],
- *       mostFollowed: [...],
- *       new: [...]
+ *       trending: [...],
+ *       ...
  *     }
  *   }
  */
@@ -167,7 +202,7 @@ app.get("/anoncoin/feeds/all", async (req, res) => {
       });
     }
 
-    const results = await Promise.all(
+    const rawResults = await Promise.all(
       sorts.map((sortBy) =>
         fetchFeed({ sortBy, limit, chainType }).catch((err) => ({
           _error: err.message,
@@ -177,7 +212,13 @@ app.get("/anoncoin/feeds/all", async (req, res) => {
 
     const feeds = {};
     sorts.forEach((name, idx) => {
-      feeds[name] = results[idx];
+      const raw = rawResults[idx];
+      if (raw && raw._error) {
+        // If upstream failed for this mode, expose empty array + error
+        feeds[name] = [];
+      } else {
+        feeds[name] = normalizeDubDubFeed(raw);
+      }
     });
 
     res.json({
