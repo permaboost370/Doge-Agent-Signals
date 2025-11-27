@@ -64,44 +64,52 @@ async function cachedFetch(key, url, options = {}, ttlMs = DEFAULT_CACHE_TTL_MS)
 }
 
 /**
+ * Walk an arbitrary JSON structure and return the *largest* array of objects.
+ * This handles basically any weird nesting the upstream API might use.
+ */
+function findLargestObjectArray(root, maxDepth = 5) {
+  let best = null;
+
+  function walk(node, depth) {
+    if (depth > maxDepth || node === null || node === undefined) return;
+
+    if (Array.isArray(node)) {
+      if (node.length && typeof node[0] === "object") {
+        if (!best || node.length > best.length) {
+          best = node;
+        }
+      }
+      // still walk children in case there are deeper, larger arrays
+      node.forEach((child) => walk(child, depth + 1));
+      return;
+    }
+
+    if (typeof node === "object") {
+      for (const v of Object.values(node)) {
+        walk(v, depth + 1);
+      }
+    }
+  }
+
+  walk(root, 0);
+  return best || [];
+}
+
+/**
  * Normalize dubdub/anoncoin feed response into a flat array of entries.
- * This removes guesswork from the frontend.
  */
 function normalizeDubDubFeed(data) {
   if (!data) return [];
-  if (Array.isArray(data)) return data;
-
-  if (typeof data !== "object") return [];
-
-  // Common patterns:
-  // { feeds: [...] }
-  if (Array.isArray(data.feeds)) return data.feeds;
-
-  // Sometimes feeds: { something: [...] }
-  if (data.feeds && typeof data.feeds === "object" && !Array.isArray(data.feeds)) {
-    const feedsVals = Object.values(data.feeds);
-    const firstArray = feedsVals.find((v) => Array.isArray(v));
-    if (firstArray) return firstArray;
+  // if it's already an array of objects, just return it
+  if (Array.isArray(data) && data.length && typeof data[0] === "object") {
+    return data;
   }
-
-  // Other common keys we might see
-  const candidateKeys = ["items", "data", "docs", "results", "tokens", "coins"];
-  for (const key of candidateKeys) {
-    const v = data[key];
-    if (Array.isArray(v)) return v;
-  }
-
-  // Fallback: first array among values
-  const vals = Object.values(data);
-  const firstArray = vals.find((v) => Array.isArray(v));
-  if (firstArray) return firstArray;
-
-  return [];
+  // otherwise, hunt for the largest object-array inside
+  return findLargestObjectArray(data, 5);
 }
 
 /**
  * Fetch a single feed from dubdub
- * (we just forward whatever sortBy anoncoin supports)
  */
 async function fetchFeed({ sortBy, limit, chainType }) {
   const url = buildDubDubUrl({ sortBy, limit, chainType });
@@ -164,7 +172,7 @@ app.get("/anoncoin/feeds", async (req, res) => {
  * GET /anoncoin/feeds/all
  *
  * Query:
- *   modes=marketCap,volume24h,topToday,mostFollowed,new,trending
+ *   modes=trending,marketCap   (or others)
  *   limit=10
  *   chainType=solana
  *
@@ -174,9 +182,8 @@ app.get("/anoncoin/feeds", async (req, res) => {
  *     limit,
  *     source,
  *     feeds: {
- *       marketCap: [...],
- *       trending: [...],
- *       ...
+ *       trending:  [...],
+ *       marketCap: [...]
  *     }
  *   }
  */
@@ -214,7 +221,7 @@ app.get("/anoncoin/feeds/all", async (req, res) => {
     sorts.forEach((name, idx) => {
       const raw = rawResults[idx];
       if (raw && raw._error) {
-        // If upstream failed for this mode, expose empty array + error
+        console.error(`Error for mode ${name}:`, raw._error);
         feeds[name] = [];
       } else {
         feeds[name] = normalizeDubDubFeed(raw);
